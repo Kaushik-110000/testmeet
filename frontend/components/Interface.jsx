@@ -1,9 +1,10 @@
-import React, { useState, useRef, useEffect } from 'react';
-import io from 'socket.io-client';
-import * as mediasoupClient from 'mediasoup-client';
+import React, { useState, useRef, useEffect } from "react";
+import io from "socket.io-client";
+import * as mediasoupClient from "mediasoup-client";
+import dotenv from "dotenv";
 
 // Create a socket connection to your backend server.
-const socket = io('http://localhost:5000');
+const socket = io(process.env.BACKEND);
 
 function MeetInterface() {
   const [roomId, setRoomId] = useState("");
@@ -18,7 +19,7 @@ function MeetInterface() {
 
   // Function to join a room (whether creating or joining)
   const joinRoom = (room) => {
-    socket.emit('joinRoom', { roomId: room });
+    socket.emit("joinRoom", { roomId: room });
     setCurrentRoom(room);
   };
 
@@ -42,7 +43,7 @@ function MeetInterface() {
     setCurrentRoom(null);
     // Stop local media if active.
     if (localStream) {
-      localStream.getTracks().forEach(track => track.stop());
+      localStream.getTracks().forEach((track) => track.stop());
       setLocalStream(null);
     }
     // Optionally, inform the server of leaving.
@@ -52,7 +53,10 @@ function MeetInterface() {
   const handleStartCamera = async () => {
     try {
       // Capture local video and audio.
-      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: true,
+        audio: true,
+      });
       setLocalStream(stream);
       if (localVideoRef.current) {
         localVideoRef.current.srcObject = stream;
@@ -60,16 +64,17 @@ function MeetInterface() {
       // When a producer transport is ready, produce your video track.
       if (producerTransport && stream.getVideoTracks().length > 0) {
         const videoTrack = stream.getVideoTracks()[0];
-        producerTransport.produce({
-          track: videoTrack,
-          appData: { mediaTag: "video" }
-        })
-        .then(producer => {
-          console.log("Producer created with ID:", producer.id);
-        })
-        .catch(err => {
-          console.error("Error producing video:", err);
-        });
+        producerTransport
+          .produce({
+            track: videoTrack,
+            appData: { mediaTag: "video" },
+          })
+          .then((producer) => {
+            console.log("Producer created with ID:", producer.id);
+          })
+          .catch((err) => {
+            console.error("Error producing video:", err);
+          });
       }
     } catch (error) {
       console.error("Error accessing media devices:", error);
@@ -80,8 +85,11 @@ function MeetInterface() {
   useEffect(() => {
     if (currentRoom) {
       // Listen for RTP capabilities from the server.
-      socket.on('rtpCapabilities', async (routerRtpCapabilities) => {
-        console.log('Received RTP capabilities from server:', routerRtpCapabilities);
+      socket.on("rtpCapabilities", async (routerRtpCapabilities) => {
+        console.log(
+          "Received RTP capabilities from server:",
+          routerRtpCapabilities
+        );
         try {
           // Initialize the mediasoup-client Device.
           const device = new mediasoupClient.Device();
@@ -95,8 +103,8 @@ function MeetInterface() {
       });
 
       // Listen for notifications of new remote producers.
-      socket.on('newProducer', ({ producerId, socketId }) => {
-        console.log('New remote producer available:', producerId);
+      socket.on("newProducer", ({ producerId, socketId }) => {
+        console.log("New remote producer available:", producerId);
         // If consumer transport is not yet created, create one.
         if (!consumerTransport && device) {
           createConsumerTransport(device, producerId);
@@ -109,102 +117,129 @@ function MeetInterface() {
 
     // Clean up the listeners when leaving the room.
     return () => {
-      socket.off('rtpCapabilities');
-      socket.off('newProducer');
+      socket.off("rtpCapabilities");
+      socket.off("newProducer");
     };
   }, [currentRoom, device, consumerTransport, producerTransport]);
 
   // Create a transport for sending (producing) media.
   const createProducerTransport = (device) => {
-    socket.emit('createWebRtcTransport', { direction: "producer" }, ({ params, error }) => {
-      if (error) {
-        console.error("Error creating producer transport:", error);
-        return;
+    socket.emit(
+      "createWebRtcTransport",
+      { direction: "producer" },
+      ({ params, error }) => {
+        if (error) {
+          console.error("Error creating producer transport:", error);
+          return;
+        }
+        // Use the received parameters to create a send transport.
+        const transport = device.createSendTransport(params);
+        transport.on("connect", ({ dtlsParameters }, callback, errback) => {
+          // Send DTLS parameters to the server to connect the transport.
+          socket.emit(
+            "connectTransport",
+            { transportId: params.id, dtlsParameters, direction: "producer" },
+            (response) => {
+              if (response.error) {
+                errback(response.error);
+              } else {
+                callback();
+              }
+            }
+          );
+        });
+        transport.on(
+          "produce",
+          ({ kind, rtpParameters, appData }, callback, errback) => {
+            // Tell the server to produce this track.
+            socket.emit(
+              "produce",
+              { kind, rtpParameters, appData },
+              (response) => {
+                if (response.error) {
+                  errback(response.error);
+                } else {
+                  callback({ id: response.id });
+                }
+              }
+            );
+          }
+        );
+        setProducerTransport(transport);
       }
-      // Use the received parameters to create a send transport.
-      const transport = device.createSendTransport(params);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        // Send DTLS parameters to the server to connect the transport.
-        socket.emit('connectTransport', { transportId: params.id, dtlsParameters, direction: "producer" }, (response) => {
-          if (response.error) {
-            errback(response.error);
-          } else {
-            callback();
-          }
-        });
-      });
-      transport.on('produce', ({ kind, rtpParameters, appData }, callback, errback) => {
-        // Tell the server to produce this track.
-        socket.emit('produce', { kind, rtpParameters, appData }, (response) => {
-          if (response.error) {
-            errback(response.error);
-          } else {
-            callback({ id: response.id });
-          }
-        });
-      });
-      setProducerTransport(transport);
-    });
+    );
   };
 
   // Create a transport for receiving (consuming) remote media.
   const createConsumerTransport = (device, newProducerId) => {
-    socket.emit('createWebRtcTransport', { direction: "consumer" }, ({ params, error }) => {
-      if (error) {
-        console.error("Error creating consumer transport:", error);
-        return;
-      }
-      // Use the received parameters to create a receive transport.
-      const transport = device.createRecvTransport(params);
-      transport.on('connect', ({ dtlsParameters }, callback, errback) => {
-        socket.emit('connectTransport', { transportId: params.id, dtlsParameters, direction: "consumer" }, (response) => {
-          if (response.error) {
-            errback(response.error);
-          } else {
-            callback();
-          }
+    socket.emit(
+      "createWebRtcTransport",
+      { direction: "consumer" },
+      ({ params, error }) => {
+        if (error) {
+          console.error("Error creating consumer transport:", error);
+          return;
+        }
+        // Use the received parameters to create a receive transport.
+        const transport = device.createRecvTransport(params);
+        transport.on("connect", ({ dtlsParameters }, callback, errback) => {
+          socket.emit(
+            "connectTransport",
+            { transportId: params.id, dtlsParameters, direction: "consumer" },
+            (response) => {
+              if (response.error) {
+                errback(response.error);
+              } else {
+                callback();
+              }
+            }
+          );
         });
-      });
-      setConsumerTransport(transport);
-      // Consume the new producer’s media.
-      consumeMedia(newProducerId, transport, device);
-    });
+        setConsumerTransport(transport);
+        // Consume the new producer’s media.
+        consumeMedia(newProducerId, transport, device);
+      }
+    );
   };
 
   // Consume a remote producer’s media and display it.
   const consumeMedia = (producerId, transport, device) => {
-    socket.emit('consume', { producerId, rtpCapabilities: device.rtpCapabilities }, (response) => {
-      if (response.error) {
-        console.error("Error consuming media:", response.error);
-        return;
+    socket.emit(
+      "consume",
+      { producerId, rtpCapabilities: device.rtpCapabilities },
+      (response) => {
+        if (response.error) {
+          console.error("Error consuming media:", response.error);
+          return;
+        }
+        const { params } = response;
+
+        // Use the transport to consume the track
+        const consumer = transport.consume({
+          id: params.id,
+          producerId: params.producerId,
+          kind: params.kind,
+          rtpParameters: params.rtpParameters,
+        });
+
+        console.log("Consumer created:", consumer); // Debugging: Log the consumer object
+
+        // Ensure the consumer has a valid track
+        if (!consumer.track) {
+          console.error("Consumer track is missing!");
+          return;
+        }
+
+        // Create a new MediaStream for the remote video
+        const remoteStream = new MediaStream();
+        remoteStream.addTrack(consumer.track); // Add the track to the stream
+
+        // Display the remote stream in the video element
+        if (remoteVideoRef.current) {
+          remoteVideoRef.current.srcObject = remoteStream;
+        }
       }
-      const { params } = response;
-  
-      // Use the transport to consume the track
-      const consumer = transport.consume({
-        id: params.id,
-        producerId: params.producerId,
-        kind: params.kind,
-        rtpParameters: params.rtpParameters,
-      });
-  
-      console.log("Consumer created:", consumer); // Debugging: Log the consumer object
-  
-      // Ensure the consumer has a valid track
-      if (!consumer.track) {
-        console.error("Consumer track is missing!");
-        return;
-      }
-  
-      // Create a new MediaStream for the remote video
-      const remoteStream = new MediaStream();
-      remoteStream.addTrack(consumer.track); // Add the track to the stream
-  
-      // Display the remote stream in the video element
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = remoteStream;
-      }
-    });
+    );
   };
 
   return (
