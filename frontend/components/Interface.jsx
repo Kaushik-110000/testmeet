@@ -34,6 +34,7 @@ function MeetInterface() {
   };
 
   const handleJoinRoom = () => {
+    console.log(roomId, "YOur room id trying to join");
     if (!roomId) {
       alert("Enter a valid Room ID!");
       return;
